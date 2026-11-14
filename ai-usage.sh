@@ -14,8 +14,9 @@
 # These are the endpoints each tool's own usage screen reads. They are
 # read-only, but undocumented, and may change without notice.
 #
-# Tokens are not refreshed here; if one has expired, run `claude` / `codex`
-# once and it will refresh it.
+# An expired Claude OAuth token is refreshed here with its refresh token (the
+# same exchange Claude Code does) and the new tokens are written back to
+# .credentials.json. Codex tokens are not refreshed; run `codex` once.
 
 set -uo pipefail
 
@@ -47,6 +48,7 @@ exit: 0 fine, 1 some limit is at 100%, 2 error
 env (also read from .env next to this script; see .env.example):
   AI_USAGE_ENV_FILE   alternative .env path
   CLAUDE_CONFIG_DIR   default ~/.claude        CLAUDE_USAGE_URL
+  CLAUDE_TOKEN_URL CLAUDE_OAUTH_CLIENT_ID      (used to refresh the token)
   CODEX_HOME          default ~/.codex         CODEX_USAGE_URL
   ZAI_API_KEY         required for zai         ZAI_API_BASE ZAI_QUOTA_URL
   ZAI_API_URL ZAI_MODEL ZAI_SERVER_TZ          (used by --probe)
@@ -116,6 +118,37 @@ print_json() { jq . <<<"$1" 2>/dev/null || printf '%s\n' "$1"; }
 
 # ----------------------------------------------------------------- claude ---
 
+# Exchange the refresh token in CRED_FILE for a new access token and write the
+# result back (atomically, keeping the file's other fields and permissions).
+# Claude Code rotates the refresh token on every use, so the new one must be
+# saved or the next refresh fails.
+claude_refresh() {
+  local cred_file=$1 refresh url client_id resp tmp
+  refresh=$(jq -r '.claudeAiOauth.refreshToken // empty' "$cred_file")
+  [[ -n "$refresh" ]] || { err "claude: no refresh token in $cred_file"; return 1; }
+  url="${CLAUDE_TOKEN_URL:-https://platform.claude.com/v1/oauth/token}"
+  client_id="${CLAUDE_OAUTH_CLIENT_ID:-9d1c250a-e61b-44d9-88ed-5944d1962f5e}"
+
+  resp=$(jq -nc --arg rt "$refresh" --arg cid "$client_id" \
+           '{grant_type: "refresh_token", refresh_token: $rt, client_id: $cid}' |
+         curl -sS --max-time 30 -X POST -H "Content-Type: application/json" \
+           -H "User-Agent: ${CLAUDE_USER_AGENT:-claude-cli/2.1.0 (external, cli)}" \
+           --data-binary @- "$url") || { err "claude: token refresh request failed"; return 1; }
+  jq -e '.access_token | strings' >/dev/null 2>&1 <<<"$resp" || {
+    err "claude: token refresh rejected: $(jq -c '.error // .' <<<"$resp" 2>/dev/null || echo "$resp")"
+    return 1; }
+
+  tmp=$(mktemp "$cred_file.XXXXXX") || return 1
+  chmod --reference="$cred_file" "$tmp" 2>/dev/null || chmod 600 "$tmp"
+  jq --argjson r "$resp" --argjson now "$(date +%s%3N)" '
+    .claudeAiOauth.accessToken = $r.access_token
+    | .claudeAiOauth.refreshToken = ($r.refresh_token // .claudeAiOauth.refreshToken)
+    | .claudeAiOauth.expiresAt = ($now + (($r.expires_in // 3600) * 1000))
+    | if ($r.scope | type) == "string" then .claudeAiOauth.scopes = ($r.scope | split(" ")) else . end
+  ' "$cred_file" > "$tmp" && mv -f "$tmp" "$cred_file" || {
+    rm -f "$tmp"; err "claude: could not write refreshed token to $cred_file"; return 1; }
+}
+
 claude_usage() {
   local config_dir cred_file url token expires plan usage rows
   config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -127,15 +160,18 @@ claude_usage() {
     not_configured "claude: no credentials at $cred_file — log in with: CLAUDE_CONFIG_DIR=$config_dir claude"
     return; }
 
-  token=$(jq -r '.claudeAiOauth.accessToken // empty' "$cred_file")
+  # Refresh a minute early so the token can't expire mid-request.
   expires=$(jq -r '.claudeAiOauth.expiresAt // 0' "$cred_file")
+  if (( expires > 0 && expires / 1000 <= NOW + 60 )); then
+    claude_refresh "$cred_file" || {
+      err "claude: OAuth token in $cred_file expired and could not be refreshed — run: CLAUDE_CONFIG_DIR=$config_dir claude"
+      return $RC_ERROR; }
+  fi
+
+  token=$(jq -r '.claudeAiOauth.accessToken // empty' "$cred_file")
   plan=$(jq -r '.claudeAiOauth.subscriptionType // "unknown"' "$cred_file")
   [[ -n "$token" ]] || {
     not_configured "claude: no claudeAiOauth.accessToken in $cred_file"; return; }
-
-  (( expires > 0 && expires / 1000 <= NOW )) && {
-    err "claude: OAuth token in $cred_file expired — run: CLAUDE_CONFIG_DIR=$config_dir claude"
-    return $RC_ERROR; }
 
   usage=$(curl -sS --max-time 30 \
     -H "Authorization: Bearer $token" \

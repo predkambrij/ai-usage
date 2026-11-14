@@ -45,8 +45,9 @@ cp .env.example .env       # then add your z.ai API key
 | `zai` | `ZAI_API_KEY` |
 
 Settings are read from the environment or from a `.env` file next to the script.
-`.env` is gitignored. Expired Claude/Codex tokens are not refreshed; run `claude`
-or `codex` once to refresh them.
+`.env` is gitignored. An expired Claude token is refreshed automatically and the
+new tokens are written back to `.credentials.json`. Expired Codex tokens are not
+refreshed; run `codex` once to refresh them.
 
 ## Usage
 
