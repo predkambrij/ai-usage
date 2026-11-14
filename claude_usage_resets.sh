@@ -77,7 +77,7 @@ if (( show_json )); then
   exit 0
 fi
 
-jq -e '.five_hour | type == "object"' >/dev/null <<<"$usage" 2>/dev/null || {
+jq -e '(.limits | type == "array") or (.five_hour | type == "object")' >/dev/null <<<"$usage" 2>/dev/null || {
   echo "unexpected usage response: $usage" >&2; exit 2; }
 
 # Seconds -> "2h 12m" / "6d 04h 09m".
@@ -100,25 +100,41 @@ bar() {
   printf '%s' "$out"
 }
 
-label_for() {
-  case "$1" in
-    five_hour)            echo "5-hour usage" ;;
-    seven_day)            echo "Weekly usage" ;;
-    seven_day_opus)       echo "Weekly Opus" ;;
-    seven_day_sonnet)     echo "Weekly Sonnet" ;;
-    seven_day_oauth_apps) echo "Weekly apps" ;;
-    seven_day_cowork)     echo "Weekly Cowork" ;;
-    *)                    echo "$1" ;;
-  esac
-}
-
 echo "Claude subscription — usage (plan: $plan, config: $CONFIG_DIR)"
 echo
 
+# Rows come from the `limits` array, which is where per-model windows (e.g.
+# Fable) are reported. Older responses without it fall back to the top-level
+# five_hour / seven_day* keys.
+rows=$(jq -r '
+  def name: if type == "object" then (.display_name // .id // .name // "?") else tostring end;
+  def legacy_label:
+    {five_hour: "5-hour usage", seven_day: "Weekly usage", seven_day_opus: "Weekly Opus",
+     seven_day_sonnet: "Weekly Sonnet", seven_day_oauth_apps: "Weekly apps",
+     seven_day_cowork: "Weekly Cowork"}[.] // .;
+  if (.limits | type == "array" and length > 0) then
+    .limits[]
+    | (if   .kind == "session"    then "5-hour usage"
+       elif .kind == "weekly_all" then "Weekly usage"
+       else ((.group // "weekly") | if . == "session" then "5-hour" else (.[:1] | ascii_upcase) + .[1:] end)
+            + " "
+            + ([.scope.model, .scope.surface] | map(select(. != null) | name) | join(" ")
+               | if . == "" then "scoped" else . end)
+       end) as $label
+    | [$label, (.percent // 0 | round | tostring), (.resets_at // "")]
+  else
+    ["five_hour", "seven_day"] as $fixed
+    | ($fixed + ([keys[] | select(startswith("seven_day_"))] - $fixed)) as $order
+    | . as $u
+    | $order[]
+    | select($u[.] | type == "object" and has("utilization"))
+    | [legacy_label, ($u[.].utilization // 0 | round | tostring), ($u[.].resets_at // "")]
+  end
+  | @tsv' <<<"$usage")
+
 limited=0
-# Fixed windows first, then any other per-model weekly window the plan reports.
-while IFS=$'\t' read -r key pct reset; do
-  label=$(label_for "$key")
+while IFS=$'\t' read -r label pct reset; do
+  [[ -n "$label" ]] || continue
   printf '%-14s [%s] %3s%%' "$label" "$(bar "$pct")" "$pct"
 
   if [[ -n "$reset" ]] && epoch=$(date -d "$reset" +%s 2>/dev/null); then
@@ -130,14 +146,7 @@ while IFS=$'\t' read -r key pct reset; do
   echo
 
   (( pct >= 100 )) && limited=1
-done < <(jq -r '
-  ["five_hour", "seven_day"] as $fixed
-  | ($fixed + ([keys[] | select(startswith("seven_day_"))] - $fixed)) as $order
-  | . as $u
-  | $order[]
-  | select($u[.] | type == "object" and has("utilization"))
-  | [., ($u[.].utilization // 0 | round | tostring), ($u[.].resets_at // "")]
-  | @tsv' <<<"$usage")
+done <<<"$rows"
 
 if jq -e '.extra_usage.is_enabled == true' >/dev/null <<<"$usage"; then
   jq -r '.extra_usage | "\nExtra usage: \(.used_credits // 0) of \(.monthly_limit // "?") \(.currency // "") used this month"' <<<"$usage"
