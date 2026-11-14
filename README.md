@@ -1,12 +1,23 @@
-# zai_usage_resets
+# ai-usage
 
-Show your [z.ai](https://z.ai) GLM coding-plan quota usage **and when each limit resets**.
+Show your AI subscription usage limits **and when each one resets**, for Claude
+(claude.ai subscription), Codex (ChatGPT plan) and the [z.ai](https://z.ai) GLM
+coding plan.
 
-The z.ai dashboard shows how much of your quota you've used, but not when it comes
-back. This script reads the same monitoring endpoint the dashboard uses and prints
-the `nextResetTime` values it already returns, converted to your local timezone.
+`ai-usage.sh` reads the same endpoints each tool's own usage screen uses and
+prints the reset times they return, converted to your local timezone.
 
 ```
+Claude subscription — usage (plan: pro, config: /home/me/.claude)
+
+5-hour usage   [###.................]  16%   resets 2026-11-14 16:50:00 CET  (in 3h 42m)
+Weekly usage   [########............]  41%   resets 2026-11-14 16:00:00 CET  (in 2h 52m)
+Weekly Fable   [###.................]  17%   resets 2026-11-14 16:00:00 CET  (in 2h 52m)
+
+Codex (ChatGPT plan) — usage (plan: free, config: /home/me/.codex)
+
+30-day         [##################..]  90%   resets 2026-11-27 23:50:41 CET  (in 13d 10h 42m)
+
 Z.ai GLM coding plan — usage (plan: lite)
 
 5-hour usage   [################....]  80%   resets 2026-07-30 14:13:55 CEST  (in 2h 05m)
@@ -24,20 +35,31 @@ Requires `bash`, `curl` and `jq`.
 
 ```sh
 cp .env.example .env       # then add your z.ai API key
-./zai_usage_resets.sh
+./ai-usage.sh
 ```
 
-The key is read from `ZAI_API_KEY`, either from the environment or from a `.env`
-file next to the script. `.env` is gitignored.
+| Provider | Credentials |
+| --- | --- |
+| `claude` | the login Claude Code stores in `$CLAUDE_CONFIG_DIR` (default `~/.claude`) |
+| `codex` | the ChatGPT login Codex stores in `$CODEX_HOME` (default `~/.codex`) |
+| `zai` | `ZAI_API_KEY` |
+
+Settings are read from the environment or from a `.env` file next to the script.
+`.env` is gitignored. Expired Claude/Codex tokens are not refreshed; run `claude`
+or `codex` once to refresh them.
 
 ## Usage
 
 ```
-./zai_usage_resets.sh            # usage report
-./zai_usage_resets.sh --json     # raw API response
-./zai_usage_resets.sh --probe    # also send a 1-token chat request (costs a prompt)
-./zai_usage_resets.sh --help
+./ai-usage.sh                # every provider that has credentials
+./ai-usage.sh claude         # one provider (several can be named)
+./ai-usage.sh zai --json     # raw API response
+./ai-usage.sh zai --probe    # also send a 1-token chat request (costs a prompt)
+./ai-usage.sh --help
 ```
+
+With no provider named, providers without credentials are skipped; naming one
+that has none is an error.
 
 Exit codes: `0` fine, `1` some limit is at 100%, `2` error — so it works in cron
 or a monitor.
@@ -79,7 +101,7 @@ in the account currency; it is not the amount charged for your Coding Plan.
 
 ## Caveat
 
-`/api/monitor/usage/quota/limit` is undocumented, so z.ai may change or remove it
-at any time. Unrecognised limit types are printed with their raw fields rather
-than guessed at, and a malformed response exits `2` instead of reporting
+The usage endpoints are undocumented, so any provider may change or remove its
+endpoint at any time. Unrecognised limit types are printed with their raw fields
+rather than guessed at, and a malformed response exits `2` instead of reporting
 something wrong.
